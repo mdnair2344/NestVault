@@ -1,0 +1,14 @@
+// In-memory stand-in for the 'mongodb' driver (subset). Used only by `npm test` (NESTVAULT_FAKE_DB=1).
+const match=(d,f)=>Object.entries(f||{}).every(([k,v])=>k==='$or'?v.some(x=>match(d,x)):v&&typeof v==='object'&&!Array.isArray(v)&&!(v instanceof Date)?('$in'in v?v.$in.includes(d[k]):'$gt'in v?d[k]>v.$gt:'$ne'in v?d[k]!==v.$ne:'$lt'in v?d[k]<v.$lt:'$exists'in v?(d[k]!==undefined)===v.$exists:true):d[k]===v);
+const get=(o,p)=>p.split('.').reduce((a,k)=>a&&a[k],o);
+class Cur{constructor(a){this.a=a}sort(s){const[k,d]=Object.entries(s)[0];this.a.sort((x,y)=>(x[k]>y[k]?1:x[k]<y[k]?-1:0)*d);return this}skip(n){this.a=this.a.slice(n);return this}limit(n){this.a=this.a.slice(0,n);return this}
+ project(p){const ex=Object.entries(p).some(([k,v])=>v===0&&k!=='_id');this.a=this.a.map(d=>{if(ex){const c={...d};for(const k in p)delete c[k];return c}const c={_id:d._id};for(const k in p)if(p[k])c[k]=d[k];return c});return this}async toArray(){return this.a.map(x=>({...x}))}}
+class Col{constructor(){this.d=[]}async createIndex(){}async insertOne(x){if(this.d.some(y=>y._id===x._id)||(x.email&&this.d.some(y=>y.email===x.email))){throw Object.assign(new Error('dup'),{code:11000})}this.d.push({...x})}async insertMany(a){for(const x of a)await this.insertOne(x)}
+ async findOne(f,o){const r=this.d.find(x=>match(x,f));return r?{...r}:null}find(f){return new Cur(this.d.filter(x=>match(x,f)))}
+ async updateMany(f,u){for(const r of this.d.filter(x=>match(x,f)))Object.assign(r,u.$set||{})}async updateOne(f,u,o){const r=this.d.find(x=>match(x,f));if(!r){if(o&&o.upsert){this.d.push({_id:f._id,...u.$set});return{matchedCount:0}}return{matchedCount:0}}for(const[k,v]of Object.entries(u.$inc||{}))r[k]=(r[k]||0)+v;Object.assign(r,u.$set||{});return{matchedCount:1}}
+ async findOneAndUpdate(f,u){const r=this.d.find(x=>match(x,f));if(!r)return null;for(const[k,v]of Object.entries(u.$inc||{}))r[k]=(r[k]||0)+v;Object.assign(r,u.$set||{});return{...r}}
+ async deleteOne(f){const i=this.d.findIndex(x=>match(x,f));if(i>=0)this.d.splice(i,1)}async deleteMany(f){this.d=this.d.filter(x=>!match(x,f))}
+ async countDocuments(f){return this.d.filter(x=>match(x,f)).length}async estimatedDocumentCount(){return this.d.length}
+ aggregate(st){let a=this.d.filter(x=>match(x,st[0].$match));const g=st[1].$group,o={_id:null};for(const[k,v]of Object.entries(g)){if(k==='_id')continue;if(v.$sum===1)o[k]=a.length;else o[k]=a.reduce((s,x)=>s+(get(x,v.$sum.slice(1))||0),0)}return{toArray:async()=>a.length?[o]:[]}}}
+class DBc{constructor(){this.c={}}collection(n){return this.c[n]=this.c[n]||new Col}get databaseName(){return'nestvault'}async command(){return{setName:'atlas-test-shard-0',me:'a:27017',primary:'a:27017',hosts:['a:27017','b:27017','c:27017'],isWritablePrimary:true}}}
+exports.MongoClient=class{constructor(){this.db_=new DBc}async connect(){}db(){return this.db_}};

@@ -1,0 +1,61 @@
+// Browser end-to-end tests (real Chromium via Playwright) against the running server with the in-memory database.
+// Setup once: npm install && npx playwright install chromium     Run: npm run test:e2e
+const {test,before,after}=require('node:test'),assert=require('node:assert/strict'),{spawn}=require('node:child_process'),path=require('node:path');
+const {chromium}=require('playwright');
+const PORT=4300+Math.floor(Math.random()*90),URL='http://localhost:'+PORT;let proc,browser,out='';
+const PW='correct horse battery';
+let ipn=0;
+const ctx=async()=>{const c=await browser.newContext({acceptDownloads:true,extraHTTPHeaders:{'x-forwarded-for':'10.7.'+(ipn++)+'.1'}}),p=await c.newPage();p.setDefaultTimeout(20000);p.on('dialog',d=>d.accept());return{c,p}};
+const fillSignup=async(p,email,pw,name='E2E User')=>{await p.click('#swap');await p.fill('[name=name]',name);await p.fill('[name=email]',email);await p.fill('[name=phone]','9876543210');await p.fill('[name=org]','E2E Clinic');await p.selectOption('#suRole','editor');await p.fill('[name=code]','editor-code-1');await p.fill('[name=password]',pw);await p.fill('[name=confirm]',pw)};
+const newEditor=async p=>{const email=`e2e-${uniq()}@test.io`;await p.goto(URL);await fillSignup(p,email,'longenough123');await p.click('#authBtn');await p.waitForSelector('#app:not([hidden])');return email}; // registers a fresh editor and returns its email
+const signin=async(p,email)=>{await p.goto(URL);await p.fill('[name=email]',email);await p.fill('[name=password]','longenough123');await p.click('#authBtn');await p.waitForSelector('#app:not([hidden])')};
+const go=(p,v)=>p.click(`nav a[data-v=${v}]`),net=(p,v)=>p.context().setOffline(v==='offline');
+const row=(p,t)=>p.locator('tr',{hasText:t});
+async function newRecord(p,title,body=''){await go(p,'records');await p.click('button:has-text("New record")');await p.fill('#recform input[name=title]',title);if(body)await p.fill('#recform textarea[name=body]',body);await p.click('#recform button.primary')}
+const uniq=()=>Math.random().toString(36).slice(2,8);
+before(async()=>{proc=spawn('node',[path.join(__dirname,'..','server.js')],{env:{...process.env,NESTVAULT_FAKE_DB:'1',MONGODB_URI:'fake',PORT,LOG:'off',APP_URL:URL,EDITOR_CODE:'editor-code-1',ADMIN_CODE:'admin-code-1',TRUST_PROXY:'1'}});proc.stdout.on('data',d=>out+=d);
+  await new Promise((ok,no)=>{const iv=setInterval(()=>out.includes('running')&&(clearInterval(iv),ok()),50);setTimeout(()=>no(Error('server timeout')),15000)});browser=await chromium.launch()});
+after(async()=>{await browser.close();proc.kill()});
+
+test('sign up, session survives reload, theme switch is remembered',async()=>{const {c,p}=await ctx(),email=`u${uniq()}@e2e.io`;await p.goto(URL);
+  await fillSignup(p,email,'longenough123','E2E User');await p.click('#authBtn');await p.waitForSelector('#app:not([hidden])');
+  assert.match(await p.textContent('#uname'),/E2E User/);const before=await p.getAttribute('html','data-theme');await p.click('#themeB');assert.notEqual(await p.getAttribute('html','data-theme'),before);
+  await p.reload();await p.waitForSelector('#app:not([hidden])');assert.notEqual(await p.getAttribute('html','data-theme'),before);await c.close()});
+test('offline record is queued and syncs when back online',async()=>{const {c,p}=await ctx();await newEditor(p);await net(p,'offline');await newRecord(p,'E2E offline note');
+  await p.waitForSelector('tr:has-text("E2E offline note") >> text=pending');assert.match(await p.textContent('#pill'),/Offline/);
+  await net(p,'online');await p.waitForSelector('tr:has-text("E2E offline note") >> text=/synced v1/',{timeout:30000});await c.close()});
+test('two devices: same-field offline edits produce a conflict that the user resolves',async()=>{const A=await ctx(),Bd=await ctx();const who=await newEditor(A.p);await signin(Bd.p,who);const t='Plan '+uniq();
+  await newRecord(A.p,t,'start');await A.p.waitForSelector(`tr:has-text("${t}") >> text=/synced/`);await go(Bd.p,'records');await Bd.p.click('nav a[data-v=sync]');await Bd.p.click('button:has-text("Sync now")');await go(Bd.p,'records');await Bd.p.waitForSelector(`tr:has-text("${t}")`);
+  await net(A.p,'offline');await row(A.p,t).getByRole('button',{name:'Edit'}).click();await A.p.fill('#recform textarea[name=body]','from A');await A.p.click('#recform button.primary');
+  await row(Bd.p,t).getByRole('button',{name:'Edit'}).click();await Bd.p.fill('#recform textarea[name=body]','from B');await Bd.p.click('#recform button.primary');await Bd.p.waitForSelector(`tr:has-text("${t}") >> text=/synced v2/`);
+  await net(A.p,'online');await A.p.waitForSelector('button:has-text("Use my version")',{timeout:30000});await A.p.click('button:has-text("Use my version")');await A.p.waitForSelector(`tr:has-text("from A")`,{timeout:20000});
+  await A.c.close();await Bd.c.close()});
+test('vault: encrypted note, preview, wrong passphrase, duplicate detection',async()=>{const {c,p}=await ctx();await newEditor(p);await go(p,'vault');await p.fill('#pass',PW);const note='secret '+uniq();await p.fill('#note',note);await p.click('button:has-text("Encrypt and save note")');
+  await p.waitForSelector('#vlist tr:has-text("note-")');await p.click('#vlist button:has-text("Preview")');await p.waitForSelector(`dialog pre:has-text("${note}")`);await p.click('dialog button:has-text("Close")');
+  await p.fill('#pass','definitely the wrong one');await p.click('#vlist button:has-text("Download")');await p.waitForSelector('.toast:has-text("Wrong passphrase")');
+  await p.fill('#pass',PW);await p.fill('#note',note);await p.click('button:has-text("Encrypt and save note")');await p.waitForSelector('.toast:has-text("Already stored")');await c.close()});
+test('recovery: ransomware drill then restore from a backup',async()=>{const {c,p}=await ctx();await newEditor(p);const t='Recovery '+uniq();await newRecord(p,t);await p.waitForSelector(`tr:has-text("${t}") >> text=/synced/`);
+  await go(p,'backups');await p.click('button:has-text("Back up now")');await p.waitForSelector('.toast:has-text("Backup created")');
+  await go(p,'infra');await p.click('button:has-text("Run ransomware drill")');await p.waitForSelector('nav a.on[data-v=backups]');await go(p,'records');await p.waitForSelector('text=No records');
+  await go(p,'backups');await p.locator('tr button:has-text("Restore")').first().click();await p.click('dialog button:has-text("Replace current data")');await p.waitForSelector('.toast:has-text("Restored")');
+  await go(p,'records');await p.waitForSelector('#list table',{timeout:20000});await c.close()});
+test('a replace-restore is blocked while offline changes are waiting',async()=>{const {c,p}=await ctx();await newEditor(p);const t0='Base '+uniq();await newRecord(p,t0);await p.waitForSelector(`tr:has-text("${t0}") >> text=/synced/`);await go(p,'backups');await p.click('button:has-text("Back up now")');await p.waitForSelector('.toast:has-text("Backup created")');await p.route('**/api/sync',r=>r.abort());await newRecord(p,'Waiting '+uniq());await p.waitForSelector('tr:has-text("Waiting") >> text=pending');await go(p,'backups');await p.locator('tr button:has-text("Restore")').first().click();
+  await p.waitForSelector('dialog:has-text("have not synced")');assert.equal(await p.isDisabled('dialog button:has-text("Replace current data")'),true);await c.close()});
+test('interrupted upload resumes after a page reload',async()=>{const {c,p}=await ctx();await newEditor(p);await go(p,'vault');await p.fill('#pass',PW);
+  await p.route('**/api/vault/upload/*/1',r=>r.abort());await p.setInputFiles('#file',{name:'resume.bin',mimeType:'application/octet-stream',buffer:Buffer.alloc(1300000,7)});await p.click('button:has-text("Encrypt and upload")');
+  await p.waitForSelector('.toast:has-text("Upload interrupted")');await p.unroute('**/api/vault/upload/*/1');await p.reload();await p.waitForSelector('#app:not([hidden])');await go(p,'vault');
+  await p.waitForSelector('text=Interrupted uploads');await p.click('button:has-text("Resume")');await p.waitForSelector('#vlist tr:has-text("resume.bin")',{timeout:30000});assert.equal(await p.locator('text=Interrupted uploads').count(),0);await c.close()});
+test('signing out with unsynced changes warns and offers a download',async()=>{const {c,p}=await ctx();await newEditor(p);await net(p,'offline');await newRecord(p,'Only here '+uniq());
+  await p.click('button:has-text("Sign out")');await p.waitForSelector('dialog:has-text("exist only on this device")');const dl=p.waitForEvent('download');await p.click('dialog button:has-text("Download them first")');assert.match((await dl).suggestedFilename(),/unsynced/);
+  await p.click('dialog button:has-text("Sign out anyway")');await p.waitForSelector('#auth:not([hidden])');await c.close()});
+test('local data can be imported from a JSON file',async()=>{const {c,p}=await ctx();await newEditor(p);await go(p,'account');const t='Imported '+uniq();
+  await p.setInputFiles('#impf',{name:'r.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify([{title:t,priority:'high'}]))});await p.click('button:has-text("Import records")');await p.waitForSelector('.toast:has-text("Imported 1")');
+  await go(p,'records');await p.waitForSelector(`tr:has-text("${t}")`);await c.close()});
+test('password reset by email link',async()=>{const {c,p}=await ctx(),email=`r${uniq()}@e2e.io`;await p.goto(URL);await fillSignup(p,email,'firstpassword1','Reset User');await p.click('#authBtn');await p.waitForSelector('#app:not([hidden])');
+  await p.click('button:has-text("Sign out")');await p.waitForSelector('#auth:not([hidden])');await p.click('text=Forgot password?');await p.fill('#fpform input[name=email]',email);await p.click('#fpform button.primary');await p.waitForSelector('.toast:has-text("reset link")');
+  await p.waitForFunction(()=>true);let tok;for(let i=0;i<40&&!tok;i++){const m=out.match(/#reset=([\w-]+)/g);if(m)tok=m.pop().split('=')[1];else await new Promise(r=>setTimeout(r,100))}assert.ok(tok,'mail was printed');
+  const q=await ctx();await q.p.goto(URL+'/#reset='+tok);await q.p.fill('#rsform input[name=password]','secondpassword2');await q.p.click('#rsform button.primary');await q.p.waitForSelector('.toast:has-text("Password changed")');
+  await q.p.fill('input[name=email]',email);await q.p.fill('input[name=password]','secondpassword2');await q.p.click('#authBtn');await q.p.waitForSelector('#app:not([hidden])');await q.c.close();await c.close()});
+test('editing is paused while a restore holds the lock',async()=>{const {c,p}=await ctx();await newEditor(p);await go(p,'records');await p.evaluate(()=>setBusy(30));await p.waitForTimeout(1200);
+  assert.ok(await p.evaluate(()=>document.body.classList.contains('busy')));const t='Blocked '+uniq();await p.evaluate(t=>saveLocal('x'+Date.now(),{title:t}),t);await p.waitForSelector('.toast:has-text("restore is running")');assert.equal(await p.locator(`tr:has-text("${t}")`).count(),0);
+  await p.evaluate(()=>setBusy(0));assert.equal(await p.evaluate(t=>saveLocal('y'+Date.now(),{title:t}),'After '+uniq()),true);await c.close()});

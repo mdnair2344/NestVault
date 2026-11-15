@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NestVault status</title><link rel="icon" href="icon.svg"><link rel="stylesheet" href="style.css"></head>
+<body>
+<main class="status">
+  <h1>NestVault service status</h1>
+  <p class="mut">Live health of the cloud services behind NestVault. Refreshes every 10 seconds.</p>
+  <div id="banner" class="note">Checking...</div>
+  <table>
+    <tr><th>Component</th><th>State</th><th>Detail</th></tr>
+    <tbody id="rows"></tbody>
+  </table>
+  <h3>Platform</h3>
+  <dl id="meta"></dl>
+  <p><a href="/">Open the app</a> &middot; <span class="mut" id="checked"></span></p>
+</main>
+<script src="status.js"></script>
+</body></html>

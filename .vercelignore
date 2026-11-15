@@ -1,0 +1,7 @@
+node_modules
+.env
+.secret
+e2e
+e2e-log.txt
+test/*.test.js
+scripts

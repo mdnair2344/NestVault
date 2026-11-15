@@ -1,0 +1,26 @@
+{
+  "name": "nestvault",
+  "version": "4.0.0",
+  "description": "NestVault - offline-first cloud sync + backup & disaster recovery platform (MongoDB Atlas)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/api.test.js test/client.test.js test/audit.test.js test/lock.test.js",
+    "test:atlas": "TEST_ATLAS=1 node --test test/api.test.js",
+    "test:e2e": "node --test e2e/e2e.test.js",
+    "check:atlas": "node scripts/atlas-check.js",
+    "setup:mail": "node scripts/setup-mail.js",
+    "test:mail": "node scripts/mail-test.js",
+    "check:deploy": "node scripts/check-deploy.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "mongodb": "^6.22.0"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}
