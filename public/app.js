@@ -51,8 +51,45 @@ function roleUi(){const r=$('#suRole').value,need=r==='editor'||r==='admin',c=$(
   if(need){$('#codeLbl').textContent=(r==='admin'?'Administrator':'Editor')+' access password';$('#codeHelp').textContent=r==='admin'?'The administrator access password from the server settings.':'Ask your administrator for the editor access password.'}}
 async function signupOpts(){try{SO=await fetch('/api/signup-options').then(x=>x.json())}catch{return}
   for(const o of $('#suRole').options)if(o.value&&SO[o.value]===false&&!o.disabled){o.disabled=true;o.textContent+=' (not enabled on this server)'}}
-async function enter(j){S.token=j.token;S.refresh=j.refresh;S.user=j.user;saveSess();DB=await idb('nestvault-'+j.user.id);await reload();
-  $('#auth').hidden=true;$('#app').hidden=false;$('#uname').textContent=j.user.name;$('#avatar').textContent=j.user.name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();if(window.cloudEnter)cloudEnter(j.user);bell();go('dashboard');if(S.net!=='offline')sync(true).catch(()=>{})}
+async function enter(j) {
+  S.token = j.token;
+  S.refresh = j.refresh;
+  S.user = j.user;
+
+  // Save session and load user database
+  saveSess();
+  DB = await idb('nestvault-' + j.user.id);
+  await reload();
+
+  // Show application
+  $('#auth').hidden = true;
+  $('#app').hidden = false;
+
+  // User information
+  $('#uname').textContent = j.user.name;
+  $('#avatar').textContent = j.user.name
+    .split(' ')
+    .map(w => w[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+
+  // Hide Backup and Trash for Reader accounts
+  const isReader = j.user.role === 'viewer';
+
+  $('#navBackups').hidden = isReader;
+  $('#navTrash').hidden = isReader;
+
+  // Existing application functionality
+  if (window.cloudEnter) cloudEnter(j.user);
+
+  bell();
+  go('dashboard');
+
+  if (S.net !== 'offline') {
+    sync(true).catch(() => {});
+  }
+}
 function forceLogout(){if(window.cloudLeave)cloudLeave();localStorage.removeItem('nvSession');S.token=S.refresh=null;S.user=null;S.pass='';$('#app').hidden=true;$('#auth').hidden=false}
 async function doLogout(){
   if(S.token&&S.net!=='offline')await fetch('/api/logout',{method:'POST',headers:{Authorization:'Bearer '+S.token}}).catch(()=>{});
@@ -112,9 +149,29 @@ async function run(quiet){
 setInterval(()=>{if(S.token&&S.auto&&S.net!=='offline'&&S.retry.at<=Date.now()&&(S.outbox.length||Date.now()-S.lastPull>60000))sync(true)},15000);
 
 /* ---------- navigation ---------- */
-const TITLES={dashboard:'Overview',records:'Records',sync:'Sync',vault:'Vault',backups:'Backups',trash:'Trash',shared:'Shared with me',infra:'Infrastructure',account:'Account',admin:'Administration'};
-function go(v){S.view=v;document.body.classList.remove('navopen');document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.v===v));
-  $('#crumb').innerHTML=`<a href="#" data-act="go" data-v="dashboard">Home</a><span>&rsaquo;</span>${h(TITLES[v]||v)}`;render()}
+const TITLES={dashboard:'Overview',records:'Records',sync:'Sync',vault:'Vault',backups:'Backups',trash:'Trash',shared:'Shared with me',account:'Account',admin:'Administration'};
+function go(v) {
+  // Prevent Reader accounts from accessing Backup and Trash
+  if (
+    S.user?.role === 'viewer' &&
+    ['backups', 'trash'].includes(v)
+  ) {
+    v = 'dashboard';
+    toast('You do not have permission to access this section.');
+  }
+
+  S.view = v;
+  document.body.classList.remove('navopen');
+
+  document.querySelectorAll('nav a').forEach(a =>
+    a.classList.toggle('on', a.dataset.v === v)
+  );
+
+  $('#crumb').innerHTML =
+    `<a href="#" data-act="go" data-v="dashboard">Home</a><span>&rsaquo;</span>${h(TITLES[v] || v)}`;
+
+  render();
+}
 async function render(){badge();const f=V[S.view];if(!f)return;const y=scrollY;try{$('#view').innerHTML=await f()}catch(e){$('#view').innerHTML=`<div class="note warn">${h(e.message)}</div>`}scrollTo(0,y)}
 const offNote=()=>S.net==='offline'?'<div class="note warn">You are offline. This section needs a connection. Records still work offline.</div>':'';
 const V={},fail=e=>offNote()||`<div class="note warn">${h(e.message)}</div>`;
@@ -307,24 +364,6 @@ async function restoreDlg(id){let p;try{p=await api(`/api/backups/${id}/preview`
   <p>Added from the backup: <b>${p.add}</b> record(s)${lst(p.sample.add)}</p><p>Reverted to older content: <b>${p.change}</b> record(s)${lst(p.sample.change)}</p><p>Not in this backup and removed if you replace: <b>${p.lose}</b> record(s)${lst(p.sample.lose)}</p><p>Vault: ${p.vaultAdd} file(s) added, ${p.vaultLose} removed if you replace.</p>
   ${p.newer?`<div class="note warn">${p.newer} record(s) were changed after this backup. Replacing would lose those changes.</div>`:''}${pend?`<div class="note warn">${pend} offline change(s) have not synced. Sync first, so nothing is lost.</div>`:''}
   <div class="row" style="justify-content:flex-end"><button data-act="close">Cancel</button>${pend?'<button data-act="sync">Sync first</button>':''}<button data-act="dorestore" data-id="${id}" data-m="copy">Restore as new copies</button><button class="danger" data-act="dorestore" data-id="${id}" data-m="replace" ${pend?'disabled':''}>Replace current data</button></div>`;$('#dlg').showModal()}
-
-/* ---------- infrastructure ---------- */
-V.infra=async()=>{let i,rc,pr,mt;try{[i,rc,pr,mt]=await Promise.all([api('/api/infra'),api('/api/recoveries'),api('/api/infra/probe'),api('/api/metrics')])}catch(e){return fail(e)}
-  const c=i.cluster,mem=[...new Set([c.primary,...c.hosts,...c.passives].filter(Boolean))],T=i.targets,M=i.measured;
-  const rto=M.lastRtoMs==null?'not measured yet':`${dur(M.lastRtoMs)} (${M.lastRtoMs<=T.rtoMin*60000?'<span class="good">within target</span>':'<span class="bad">over target</span>'})`;
-  const rpo=M.rpoExposureMs==null?'no backup yet':`${dur(M.rpoExposureMs)} (${M.rpoExposureMs<=T.rpoMin*60000?'<span class="good">within target</span>':'<span class="bad">over target</span>'})`;
-  if(pr.running)setTimeout(()=>{if(S.view==='infra')render()},2000);
-  return`<h2>Infrastructure</h2><p class="mut">Data is stored in MongoDB Atlas. Backups are ${i.separateBackupStore?'on a <b>separate</b> cluster.':'in the same cluster (set BACKUP_MONGODB_URI to use a separate one).'}</p>
-  <h3>Database</h3><dl><dt>Database</dt><dd>${h(i.db)}</dd><dt>Replica set</dt><dd>${h(c.set)}, ${c.writable?'writable':'read-only'}</dd><dt>Round trip</dt><dd>${i.ping} ms</dd><dt>Members</dt><dd>${mem.map(m=>`<code>${h(m)}</code> ${m===c.primary?'(primary)':''}`).join('<br>')||'single node'}</dd></dl>
-  <h3>Recovery objectives</h3><table><tr><th></th><th>Target</th><th>Measured</th></tr><tr><td>Recovery time (RTO)</td><td>${T.rtoMin} min</td><td>${rto}</td></tr><tr><td>Data loss window (RPO)</td><td>${T.rpoMin} min</td><td>${rpo} (time since last backup, if there are unbacked changes)</td></tr>
-  <tr><td>Backup frequency</td><td>every ${T.backupEveryMin} min</td><td>${M.backupEveryMin?'every '+M.backupEveryMin+' min':'off'} ${M.backupEveryMin&&M.backupEveryMin<=T.backupEveryMin?'<span class="good">meets target</span>':'<span class="bad">does not meet target</span>'}</td></tr></table>
-  <p><button class="primary" data-act="drill" data-id="" data-latest="1">Run recovery drill on latest backup</button> <span id="drillout" class="mut"></span></p>
-  <h3>Recovery history</h3>${rc.length?`<table><tr><th>When</th><th>Type</th><th>Backup</th><th>Items</th><th>Time</th><th>Data loss window</th><th>Result</th></tr>${rc.map(r=>`<tr><td>${dt(r.ts)}</td><td>${h(r.type)}</td><td>${h(r.label||'')}</td><td>${r.items}</td><td>${dur(r.ms)}</td><td>${dur(r.rpoMs)}</td><td>${r.ok?'<span class="good">ok</span>':'<span class="bad">failed</span>'}</td></tr>`).join('')}</table>`:'<p class="mut">No drills or restores yet.</p>'}
-  <h3>Failover test</h3><p class="mut">Starts a probe that writes and reads a small record every 0.4 s and measures any outage. While it runs, trigger a failover in Atlas (Cluster, ... menu, "Test Resilience" or "Test Primary Failover", available on paid clusters). The free tier cannot simulate a failover.</p>
-  ${pr.running?`<p>Probe running: ${pr.ok} ok, ${pr.failed} failed, primary now <code>${h(pr.primaries[pr.primaries.length-1]||'?')}</code></p>`:`<div class="row"><select id="psec"><option value="30">30 seconds</option><option value="60" selected>60 seconds</option><option value="120">120 seconds</option></select><button data-act="probe">Start probe</button></div>`}
-  ${pr.done&&!pr.running?`<p>Last probe: ${pr.ok} ok, ${pr.failed} failed, longest outage <b>${dur(pr.maxOutageMs)}</b>. Primary seen: ${pr.primaries.map(h).join(' then ')||'unknown'}.${pr.primaries.length>1?' <span class="good">A primary change happened.</span>':''}</p>`:''}
-  <h3>Server health</h3><dl><dt>Uptime</dt><dd>${dur(mt.uptimeS*1000)}</dd><dt>Requests (5xx errors)</dt><dd>${mt.requests} (${mt.errors5xx})</dd><dt>Response time</dt><dd>average ${mt.avgMs} ms, 95th percentile ${mt.p95Ms} ms</dd><dt>Database ping</dt><dd>${mt.dbPingMs??'-'} ms</dd><dt>Memory</dt><dd>${mt.memMB} MB, Node ${h(mt.node)}</dd></dl><p class="mut">Health check for monitoring tools: <code>/health</code></p>
-  <h3>Ransomware drill</h3><p class="mut">Deletes your cloud records and vault files (and the copy on this device), so you can practise restoring from a backup. Changes that have not synced are lost.</p><button class="danger" data-act="disaster">Run ransomware drill</button>`};
 
 /* ---------- account ---------- */
 const download=(name,data,type='application/json')=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([data],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)};
