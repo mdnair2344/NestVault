@@ -16,15 +16,39 @@ const VIEWER_ALLOWED = [
 
 /* null = allowed, otherwise the reason it is refused */
 function denyReason(role, method, pathname) {
+
+  // Administrator-only APIs
   if (pathname.startsWith('/api/admin/') || pathname === '/api/admin') {
     return role === 'admin' ? null : 'Administrator role required';
   }
-  if (role === 'viewer' && method !== 'GET' && method !== 'HEAD') {
-    const key = method + ' ' + pathname;
-    if (!VIEWER_ALLOWED.some(a => key === a || (a.endsWith('/') && key.startsWith(a)))) {
-      return 'Your account has the Viewer role and is read-only';
+
+  // Readers cannot access Backup or Trash APIs
+  if (role === 'viewer') {
+    const restrictedPaths = [
+      '/api/backups',
+      '/api/trash'
+    ];
+
+    const isRestricted = restrictedPaths.some(path =>
+      pathname === path || pathname.startsWith(path + '/')
+    );
+
+    if (isRestricted) {
+      return 'Reader accounts cannot access Backup or Trash';
+    }
+
+    // Existing Viewer read-only restrictions
+    if (method !== 'GET' && method !== 'HEAD') {
+      const key = method + ' ' + pathname;
+
+      if (!VIEWER_ALLOWED.some(a =>
+        key === a || (a.endsWith('/') && key.startsWith(a))
+      )) {
+        return 'Your account has the Viewer role and is read-only';
+      }
     }
   }
+
   return null;
 }
 
