@@ -260,7 +260,19 @@ R('GET','/api/shared',async({u})=>{const out=[];for(const s of await C('shares')
 R('POST','/api/shared/:id/edit',async({u,p,b})=>{const s=await C('shares').findOne({_id:p.id,with:u.id});if(!s||s.perm!=='edit')throw bad(403,'You only have view access');await guard(s.owner);
   const r=await C('records').findOne({_id:s.record_id,user_id:s.owner,deleted:0});if(!r)throw bad(404,'Record no longer exists');const f=clean(b.fields||{}),set={};for(const k of Object.keys(f))if(f[k]!==r[k])set[k]=f[k];if(!Object.keys(set).length)return{ok:true};
   await mutate(s.owner,r,set);await ev(r.user_id,'share-edit',{what:r.title,by:u.name});return{ok:true}});
+/* shared read-only records: visible to all signed-in users */
+R('GET','/api/shared-records',async({u})=>{
+  const records=await C('records')
+    .find({deleted:0})
+    .sort({updated:-1})
+    .limit(1000)
+    .toArray();
 
+  return records.map(r=>({
+    ...recOut(r),
+    ownerId:r.user_id
+  }));
+});
 /* vault: chunked upload with a server-side upload session (check -> start -> chunks -> complete) */
 R('POST','/api/vault/check',async({u,b})=>{const phash=String(b.phash||''),size=+b.size||0;if(!/^[0-9a-f]{64}$/.test(phash)||size<0)throw bad(400,'Invalid upload');
   if(size>MAXFILE)throw bad(413,'File too large (max '+Math.round(MAXFILE/1048576)+' MB)');

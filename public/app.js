@@ -2,7 +2,7 @@
 const $=s=>document.querySelector(s),h=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const PR={critical:0,high:1,normal:2,low:3},DEF={title:'Untitled',body:'',category:'general',priority:'normal',status:'open'},CH=512*1024,MAXF=25*1048576,PAGE=30;
 const J=(k,d)=>{try{return JSON.parse(localStorage[k])}catch{return d}};
-const S={user:null,token:null,refresh:null,net:'online',recs:[],outbox:[],conflicts:J('nvConf',[]),view:'dashboard',budget:0,auto:true,cats:J('nvCats',[]),q:'',cat:'',st:'',shown:PAGE,pass:'',vq:'',vt:'',vd:'',vault:[],stats:{},syncing:false,last:null,retry:{n:0,at:0},lastPull:0,notes:J('nvNotes',[]),alertSince:J('nvAlert',0)};
+const S={user:null,token:null,refresh:null,net:'online',recs:[],sharedRecs:[],outbox:[],conflicts:J('nvConf',[]),view:'dashboard',budget:0,auto:true,cats:J('nvCats',[]),q:'',cat:'',st:'',shown:PAGE,pass:'',vq:'',vt:'',vd:'',vault:[],stats:{},syncing:false,last:null,retry:{n:0,at:0},lastPull:0,notes:J('nvNotes',[]),alertSince:J('nvAlert',0)};
 const kb=n=>n==null?'-':n<1024?(n|0)+' B':n<1048576?(n/1024).toFixed(1)+' KB':(n/1048576).toFixed(1)+' MB',dt=t=>new Date(t).toLocaleString([],{dateStyle:'medium',timeStyle:'short'});
 const ago=t=>{const s=(Date.now()-t)/1000|0;return s<60?'just now':s<3600?(s/60|0)+' min ago':s<86400?(s/3600|0)+' h ago':new Date(t).toLocaleDateString()},dur=ms=>ms==null?'-':ms<1000?ms+' ms':ms<60000?(ms/1000).toFixed(1)+' s':(ms/60000).toFixed(1)+' min';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms)),nid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
@@ -136,19 +136,79 @@ V.dashboard=async()=>{
   <h3>Recent activity</h3>${(s.events||[]).map(e=>`<div class="ev"><time>${ago(e.ts)}</time><span>${evText(e)}</span></div>`).join('')||'<p class="mut">Nothing yet.</p>'}`};
 
 /* ---------- records ---------- */
-const cats=()=>[...new Set(S.recs.map(r=>r.category))].sort();
+const cats=()=>[...new Set([...S.recs,...S.sharedRecs].map(r=>r.category))].sort();
 const stat=r=>S.conflicts.some(c=>c.record===r.id)?'<span class="bad">conflict</span>':S.outbox.some(o=>o.id===r.id)?'<span class="pend">pending</span>':`<span class="sync-ok">synced v${r.version}</span>`;
 const confBox=c=>`<div class="box"><b>${h(c.title)}</b>, field <code>${h(c.field)}</code><table><tr><th>Server (kept)</th><th>Yours (saved)</th></tr><tr><td>${h(c.server)}</td><td>${h(c.client)}</td></tr></table>
   <button data-act="cres" data-id="${c.id}" data-c="server">Keep server version</button> <button data-act="cres" data-id="${c.id}" data-c="mine">Use my version</button></div>`;
-function recList(){const q=S.q.toLowerCase();
-  const l=S.recs.filter(r=>(!S.cat||r.category===S.cat)&&(!S.st||r.status===S.st)&&(!q||(r.title+' '+r.body+' '+r.category).toLowerCase().includes(q))).sort((a,b)=>PR[a.priority]-PR[b.priority]||b.updated-a.updated);
+function recList(){
+  const q=S.q.toLowerCase();
+
+  const allRecs=[
+    ...S.recs.map(r=>({...r,ownerId:S.user.id,isOwn:true})),
+    ...S.sharedRecs
+      .filter(r=>r.ownerId!==S.user.id&&!S.recs.some(own=>own.id===r.id))
+      .map(r=>({...r,isOwn:false}))
+  ];
+
+  const l=allRecs
+    .filter(r=>
+      (!S.cat||r.category===S.cat)&&
+      (!S.st||r.status===S.st)&&
+      (!q||(r.title+' '+r.body+' '+r.category).toLowerCase().includes(q))
+    )
+    .sort((a,b)=>
+      PR[a.priority]-PR[b.priority]||b.updated-a.updated
+    );
+
   if(!l.length)return'<p class="mut">No records.</p>';
-  return`<table><tr><th>Title</th><th>Priority</th><th class="hide-s">Status</th><th class="hide-s">Category</th><th>Sync</th><th></th></tr>${l.slice(0,S.shown).map(r=>`<tr><td><b>${h(r.title)}</b>${r.body?`<br><span class="mut">${h(r.body.slice(0,120))}</span>`:''}</td><td class="p-${r.priority}">${r.priority}</td><td class="hide-s">${r.status}</td><td class="hide-s">${h(r.category)}</td><td>${stat(r)}</td>
-  <td class="act"><button data-act="edit" data-id="${r.id}">Edit</button> <button data-act="hist" data-id="${r.id}">History</button> <button data-act="share" data-id="${r.id}" ${S.net==='offline'?'disabled title="Sharing needs a connection"':''}>Share</button> <button class="danger" data-act="delrec" data-id="${r.id}">Delete</button></td></tr>`).join('')}</table>
-  <p class="mut">Showing ${Math.min(S.shown,l.length)} of ${l.length}. ${l.length>S.shown?'<button data-act="more">Show more</button>':''}</p>`}
-V.records=()=>`<div class="row sb"><h2>Records</h2><button class="primary" data-act="edit">New record</button></div><p class="mut">Everything here works offline.</p>${S.conflicts.map(confBox).join('')}
+
+  return`<table>
+    <tr>
+      <th>Title</th>
+      <th>Priority</th>
+      <th class="hide-s">Status</th>
+      <th class="hide-s">Category</th>
+      <th class="hide-s">Sync</th>
+      <th>Owner</th>
+      <th></th>
+    </tr>
+    ${l.slice(0,S.shown).map(r=>`
+      <tr>
+        <td>
+          <b>${h(r.title)}</b>
+          ${r.body?`<br><span class="mut">${h(r.body.slice(0,120))}</span>`:''}
+        </td>
+        <td class="p-${r.priority}">${r.priority}</td>
+        <td class="hide-s">${r.status}</td>
+        <td class="hide-s">${h(r.category)}</td>
+        <td class="hide-s">${r.isOwn?stat(r):'Shared'}</td>
+        <td>${r.isOwn?'You':'Other user'}</td>
+        <td class="act">
+          ${r.isOwn?`
+            <button data-act="edit" data-id="${r.id}">Edit</button>
+            <button data-act="hist" data-id="${r.id}">History</button>
+            <button data-act="share" data-id="${r.id}" ${S.net==='offline'?'disabled title="Sharing needs a connection"':''}>Share</button>
+            <button class="danger" data-act="delrec" data-id="${r.id}">Delete</button>
+          `:'<span class="mut">Read-only</span>'}
+        </td>
+      </tr>
+    `).join('')}
+  </table>
+  <p class="mut">
+    Showing ${Math.min(S.shown,l.length)} of ${l.length}.
+    ${l.length>S.shown?'<button data-act="more">Show more</button>':''}
+  </p>`;
+}
+V.records=async()=>{
+  try{
+    S.sharedRecs=await api('/api/shared-records');
+  }catch(e){
+    S.sharedRecs=[];
+    console.warn('Could not load shared records:',e.message);
+  }
+  return`<div class="row sb"><h2>Records</h2><button class="primary" data-act="edit">New record</button></div><p class="mut">Your own records work offline. Shared records require an internet connection.</p>${S.conflicts.map(confBox).join('')}
   <div class="row" style="margin-bottom:10px"><input class="grow" placeholder="Search" value="${h(S.q)}" data-inp="q"><select data-chg="cat"><option value="">All categories</option>${cats().map(c=>`<option ${S.cat===c?'selected':''}>${h(c)}</option>`).join('')}</select>
-  <select data-chg="st"><option value="">Any status</option>${['open','in-progress','done'].map(c=>`<option ${S.st===c?'selected':''}>${c}</option>`).join('')}</select></div><div id="list">${recList()}</div>`;
+  <select data-chg="st"><option value="">Any status</option>${['open','in-progress','done'].map(c=>`<option ${S.st===c?'selected':''}>${c}</option>`).join('')}</select></div><div id="list">${recList()}</div>`};
 function editDlg(id){const r=S.recs.find(x=>x.id===id)||{...DEF};
   $('#dlg').innerHTML=`<form id="recform" data-id="${id||''}"><h3 style="margin-top:0">${id?'Edit record':'New record'}</h3><label>Title<input name="title" required maxlength="200" value="${h(r.title==='Untitled'&&!id?'':r.title)}"></label>
   <label>Details<textarea name="body" rows="4">${h(r.body)}</textarea></label><div class="row"><label class="grow">Category<input name="category" list="cl" value="${h(r.category)}"><datalist id="cl">${cats().map(c=>`<option>${h(c)}`).join('')}</datalist></label>
