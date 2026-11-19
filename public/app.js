@@ -51,8 +51,45 @@ function roleUi(){const r=$('#suRole').value,need=r==='editor'||r==='admin',c=$(
   if(need){$('#codeLbl').textContent=(r==='admin'?'Administrator':'Editor')+' access password';$('#codeHelp').textContent=r==='admin'?'The administrator access password from the server settings.':'Ask your administrator for the editor access password.'}}
 async function signupOpts(){try{SO=await fetch('/api/signup-options').then(x=>x.json())}catch{return}
   for(const o of $('#suRole').options)if(o.value&&SO[o.value]===false&&!o.disabled){o.disabled=true;o.textContent+=' (not enabled on this server)'}}
-async function enter(j){S.token=j.token;S.refresh=j.refresh;S.user=j.user;saveSess();DB=await idb('nestvault-'+j.user.id);await reload();
-  $('#auth').hidden=true;$('#app').hidden=false;$('#uname').textContent=j.user.name;$('#avatar').textContent=j.user.name.split(' ').map(w=>w[0]).join('').slice(0,2).toUpperCase();if(window.cloudEnter)cloudEnter(j.user);bell();go('dashboard');if(S.net!=='offline')sync(true).catch(()=>{})}
+async function enter(j) {
+  S.token = j.token;
+  S.refresh = j.refresh;
+  S.user = j.user;
+
+  // Save session and load user database
+  saveSess();
+  DB = await idb('nestvault-' + j.user.id);
+  await reload();
+
+  // Show application
+  $('#auth').hidden = true;
+  $('#app').hidden = false;
+
+  // User information
+  $('#uname').textContent = j.user.name;
+  $('#avatar').textContent = j.user.name
+    .split(' ')
+    .map(w => w[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
+
+  // Hide Backup and Trash for Reader accounts
+  const isReader = j.user.role === 'viewer';
+
+  $('#navBackups').hidden = isReader;
+  $('#navTrash').hidden = isReader;
+
+  // Existing application functionality
+  if (window.cloudEnter) cloudEnter(j.user);
+
+  bell();
+  go('dashboard');
+
+  if (S.net !== 'offline') {
+    sync(true).catch(() => {});
+  }
+}
 function forceLogout(){if(window.cloudLeave)cloudLeave();localStorage.removeItem('nvSession');S.token=S.refresh=null;S.user=null;S.pass='';$('#app').hidden=true;$('#auth').hidden=false}
 async function doLogout(){
   if(S.token&&S.net!=='offline')await fetch('/api/logout',{method:'POST',headers:{Authorization:'Bearer '+S.token}}).catch(()=>{});
@@ -113,8 +150,28 @@ setInterval(()=>{if(S.token&&S.auto&&S.net!=='offline'&&S.retry.at<=Date.now()&&
 
 /* ---------- navigation ---------- */
 const TITLES={dashboard:'Overview',records:'Records',sync:'Sync',vault:'Vault',backups:'Backups',trash:'Trash',shared:'Shared with me',account:'Account',admin:'Administration'};
-function go(v){S.view=v;document.body.classList.remove('navopen');document.querySelectorAll('nav a').forEach(a=>a.classList.toggle('on',a.dataset.v===v));
-  $('#crumb').innerHTML=`<a href="#" data-act="go" data-v="dashboard">Home</a><span>&rsaquo;</span>${h(TITLES[v]||v)}`;render()}
+function go(v) {
+  // Prevent Reader accounts from accessing Backup and Trash
+  if (
+    S.user?.role === 'viewer' &&
+    ['backups', 'trash'].includes(v)
+  ) {
+    v = 'dashboard';
+    toast('You do not have permission to access this section.');
+  }
+
+  S.view = v;
+  document.body.classList.remove('navopen');
+
+  document.querySelectorAll('nav a').forEach(a =>
+    a.classList.toggle('on', a.dataset.v === v)
+  );
+
+  $('#crumb').innerHTML =
+    `<a href="#" data-act="go" data-v="dashboard">Home</a><span>&rsaquo;</span>${h(TITLES[v] || v)}`;
+
+  render();
+}
 async function render(){badge();const f=V[S.view];if(!f)return;const y=scrollY;try{$('#view').innerHTML=await f()}catch(e){$('#view').innerHTML=`<div class="note warn">${h(e.message)}</div>`}scrollTo(0,y)}
 const offNote=()=>S.net==='offline'?'<div class="note warn">You are offline. This section needs a connection. Records still work offline.</div>':'';
 const V={},fail=e=>offNote()||`<div class="note warn">${h(e.message)}</div>`;
