@@ -223,6 +223,83 @@ R('GET','/api/audit',async({u})=>(await C('events').find({user_id:u.id}).sort({t
 const vOut=f=>({id:f._id,name:f.name,folder:f.folder||'',tags:f.tags||'',version:f.version,phash:f.phash,chash:f.chash,size:f.size,ts:f.ts});
 R('GET','/api/export',async({u})=>{await ev(u.id,'export',{});return{exported:new Date().toISOString(),records:(await recAll(u.id)).filter(r=>!r.deleted),vault:(await C('vault').find({user_id:u.id,deleted:0}).toArray()).map(vOut)}});
 
+
+/* ---------- AI: summarise one NestVault record ---------- */
+R('POST','/api/ai/summarise',async({u,b})=>{
+  if(!E.GEMINI_API_KEY)
+    throw bad(503,'AI is not configured on this server');
+
+  // Maximum 10 requests per 5 minutes per user
+  await limit('ai:'+u.id,10);
+
+  // Only access the signed-in user's own active record
+  const r=await C('records').findOne({
+    _id:String(b.id||''),
+    user_id:u.id,
+    deleted:0
+  });
+
+  if(!r)
+    throw bad(404,'Record not found (sync it first)');
+
+  if(!r.version)
+    throw bad(409,'Record is not synced yet');
+
+  // Send only the record's text and relevant fields
+  const text=`Title: ${r.title}
+Category: ${r.category}
+Priority: ${r.priority}
+Status: ${r.status}
+Details: ${r.body}`.slice(0,6000);
+
+  
+const model=E.AI_MODEL||'gemini-3.8-flash';
+
+const res=await fetch(
+  'https://generativelanguage.googleapis.com/v1beta/interactions',
+  {
+    method:'POST',
+    headers:{
+      'content-type':'application/json',
+      'x-goog-api-key':E.GEMINI_API_KEY
+    },
+    body:JSON.stringify({
+      model,
+      store:false,
+      input:`Summarise this record in 2 to 3 simple sentences. Use only the facts provided. Do not invent details.
+
+${text}`
+    })
+  }
+);
+
+if(!res.ok){
+  const errorText=await res.text();
+  console.error('[Gemini API Error]',res.status,errorText);
+  throw bad(502,'Gemini request failed. Check server logs.');
+}
+
+const j=await res.json();
+
+const summary=(j.steps||[])
+  .filter(s=>s.type==='model_output')
+  .flatMap(s=>s.content||[])
+  .filter(c=>c.type==='text')
+  .map(c=>c.text||'')
+  .join('')
+  .trim();
+
+if(!summary)
+  throw bad(502,'Gemini returned no summary');
+
+await ev(u.id,'ai',{what:r.title});
+
+return {summary};
+});
+
+
+
+
 /* sync: incremental (cursor), paginated, controlled parallelism */
 R('POST','/api/sync',async({u,b,sent,rawLen,req})=>{if(u.role==='viewer'&&Array.isArray(b.changes)&&b.changes.length)throw bad(403,'Your account has the Viewer role and is read-only');await guard(u.id);
   const changes=Array.isArray(b.changes)?b.changes.slice(0,500):[],cats=Array.isArray(b.cats)?b.cats.map(String).slice(0,50):[],ud=await C('users').findOne({_id:u.id}),epoch=ud.epoch||0;
