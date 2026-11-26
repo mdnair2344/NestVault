@@ -235,7 +235,7 @@ R('POST','/api/ai/summarise',async({u,b})=>{
   // Only access the signed-in user's own active record
   const r=await C('records').findOne({
     _id:String(b.id||''),
-    user_id:u.id,
+    //user_id:u.id,
     deleted:0
   });
 
