@@ -100,7 +100,22 @@ async function applyChange(u,c,depth=0){
   if(!res.matchedCount){if(depth<3)return conf.length+await applyChange(u,c,depth+1);throw bad(409,'Concurrent update, please sync again')}
   await snap(u,id);await touch(u,'rec');if(del)await ev(u,'delete',{title:r.title});return conf.length;
 }
-const recOut=r=>({id:r._id,...pick(r),version:r.version,updated:r.updated,deleted:r.deleted,seq:r.seq});
+const recOut = r => ({
+  id: r._id,
+  ...pick(r),
+  version: r.version,
+  updated: r.updated,
+  deleted: r.deleted,
+  seq: r.seq,
+
+  // Show the summary only if it belongs to the current record version
+  ai_summary:
+    r.ai_summary_version === r.version
+      ? (r.ai_summary || '')
+      : '',
+
+  ai_summary_at: r.ai_summary_at || null
+});
 async function recPage(u,since,cats,limit=200){const a=await C('records').find({user_id:u,seq:{$gt:since},...(cats.length?{category:{$in:cats}}:{})}).sort({seq:1}).limit(limit+1).toArray(),more=a.length>limit,page=a.slice(0,limit);
   return{records:page.map(recOut),more,cursor:page.length?page[page.length-1].seq:since}}
 const recAll=async u=>(await C('records').find({user_id:u}).sort({seq:1}).toArray()).map(recOut);
@@ -224,78 +239,114 @@ const vOut=f=>({id:f._id,name:f.name,folder:f.folder||'',tags:f.tags||'',version
 R('GET','/api/export',async({u})=>{await ev(u.id,'export',{});return{exported:new Date().toISOString(),records:(await recAll(u.id)).filter(r=>!r.deleted),vault:(await C('vault').find({user_id:u.id,deleted:0}).toArray()).map(vOut)}});
 
 
+
 /* ---------- AI: summarise one NestVault record ---------- */
-R('POST','/api/ai/summarise',async({u,b})=>{
-  if(!E.GEMINI_API_KEY)
-    throw bad(503,'AI is not configured on this server');
+R('POST', '/api/ai/summarise', async ({ u, b }) => {
+
+  if (!E.GEMINI_API_KEY)
+    throw bad(503, 'AI is not configured on this server');
 
   // Maximum 10 requests per 5 minutes per user
-  await limit('ai:'+u.id,10);
+  await limit('ai:' + u.id, 10);
 
-  // Only access the signed-in user's own active record
-  const r=await C('records').findOne({
-    _id:String(b.id||''),
-    //user_id:u.id,
-    deleted:0
+  // Find any active record visible through the shared-records feature
+  const r = await C('records').findOne({
+    _id: String(b.id || ''),
+    deleted: 0
+
   });
 
-  if(!r)
-    throw bad(404,'Record not found (sync it first)');
+  if (!r)
+    throw bad(404, 'Record not found');
 
-  if(!r.version)
-    throw bad(409,'Record is not synced yet');
+  if (!r.version)
+    throw bad(409, 'Record is not synced yet');
 
-  // Send only the record's text and relevant fields
-  const text=`Title: ${r.title}
+  // Reuse the existing summary if it matches this record version
+  if (
+    r.ai_summary &&
+    r.ai_summary_version === r.version
+  ) {
+    return {
+      summary: r.ai_summary,
+      cached: true
+    };
+  }
+
+  const recordText = `
+Title: ${r.title}
 Category: ${r.category}
 Priority: ${r.priority}
 Status: ${r.status}
-Details: ${r.body}`.slice(0,6000);
+Details: ${r.body}
+`.slice(0, 6000);
 
-  
-const model=E.AI_MODEL||'gemini-3.8-flash';
+  const model = E.AI_MODEL || 'gemini-3.8-flash';
 
-const res=await fetch(
-  'https://generativelanguage.googleapis.com/v1beta/interactions',
-  {
-    method:'POST',
-    headers:{
-      'content-type':'application/json',
-      'x-goog-api-key':E.GEMINI_API_KEY
-    },
-    body:JSON.stringify({
-      model,
-      store:false,
-      input:`Summarise this record in 2 to 3 simple sentences. Use only the facts provided. Do not invent details.
+  const res = await fetch(
+    'https://generativelanguage.googleapis.com/v1beta/interactions',
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-goog-api-key': E.GEMINI_API_KEY
+      },
+      body: JSON.stringify({
+        model,
+        store: false,
+        input: `Summarise this record in 2 to 3 simple sentences. Use only the facts provided. Do not invent details.
 
-${text}`
-    })
+${recordText}`
+      })
+    }
+  );
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    console.error('[Gemini API Error]', res.status, errorText);
+    throw bad(502, 'Gemini request failed. Check server logs.');
   }
-);
 
-if(!res.ok){
-  const errorText=await res.text();
-  console.error('[Gemini API Error]',res.status,errorText);
-  throw bad(502,'Gemini request failed. Check server logs.');
-}
+  const j = await res.json();
 
-const j=await res.json();
+  const summary = (j.steps || [])
+    .filter(s => s.type === 'model_output')
+    .flatMap(s => s.content || [])
+    .filter(c => c.type === 'text')
+    .map(c => c.text || '')
+    .join('')
+    .trim();
 
-const summary=(j.steps||[])
-  .filter(s=>s.type==='model_output')
-  .flatMap(s=>s.content||[])
-  .filter(c=>c.type==='text')
-  .map(c=>c.text||'')
-  .join('')
-  .trim();
+  if (!summary)
+    throw bad(502, 'Gemini returned no summary');
 
-if(!summary)
-  throw bad(502,'Gemini returned no summary');
+  // Save the summary directly on the shared record
+  const saved = await C('records').updateOne(
+    {
+      _id: r._id,
+      deleted: 0,
+      version: r.version
+    },
+    {
+      $set: {
+        ai_summary: summary,
+        ai_summary_version: r.version,
+        ai_summary_at: Date.now()
+      }
+    }
+  );
 
-await ev(u.id,'ai',{what:r.title});
+  if (!saved.matchedCount)
+    throw bad(409, 'Record changed while generating summary. Please try again.');
 
-return {summary};
+  await ev(u.id, 'ai', { what: r.title });
+
+  return {
+    summary,
+    cached: false
+  };
 });
+
 
 
 
